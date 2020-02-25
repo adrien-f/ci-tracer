@@ -5,15 +5,16 @@ import (
 	"io"
 
 	"github.com/opentracing/opentracing-go"
-	"github.com/uber/jaeger-client-go"
 	jaegercfg "github.com/uber/jaeger-client-go/config"
 	jaegerlog "github.com/uber/jaeger-client-go/log"
 	ddopentrace "gopkg.in/DataDog/dd-trace-go.v1/ddtrace/opentracer"
 	ddtrace "gopkg.in/DataDog/dd-trace-go.v1/ddtrace/tracer"
 )
 
+// BuildTracer tries to create a tracer based on input
 func BuildTracer(tracer string) (opentracing.Tracer, func(), error) {
-	if tracer == "jaeger" {
+	switch tracer {
+	case "jaeger":
 		tracer, closer, err := buildJaegerTracer()
 		if err != nil {
 			return nil, nil, fmt.Errorf("could not initialize Jaeger tracer: %w", err)
@@ -21,8 +22,7 @@ func BuildTracer(tracer string) (opentracing.Tracer, func(), error) {
 		return tracer, func() {
 			closer.Close()
 		}, nil
-	}
-	if tracer == "datadog" {
+	case "datadog":
 		tracer, err := buildDatadogTracer()
 		if err != nil {
 			return nil, nil, fmt.Errorf("could not initialize Datadog tracer: %w", err)
@@ -30,25 +30,20 @@ func BuildTracer(tracer string) (opentracing.Tracer, func(), error) {
 		return tracer, func() {
 			ddtrace.Stop()
 		}, nil
+	default:
+		return nil, nil, fmt.Errorf("unknown tracer: %s", tracer)
 	}
-	return nil, nil, nil
 }
 
 func buildJaegerTracer() (opentracing.Tracer, io.Closer, error) {
-	cfg := jaegercfg.Configuration{
-		ServiceName: "ci-tracer",
-		Sampler: &jaegercfg.SamplerConfig{
-			Type:  jaeger.SamplerTypeConst,
-			Param: 1,
-		},
-		Reporter: &jaegercfg.ReporterConfig{
-			LocalAgentHostPort: "127.0.0.1:6831",
-		},
+	cfg, err := jaegercfg.FromEnv()
+	if err != nil {
+		return nil, nil, err
 	}
 	jLogger := jaegerlog.StdLogger
 	tracer, closer, err := cfg.NewTracer(jaegercfg.Logger(jLogger))
 	if err != nil {
-		return nil, nil, nil
+		return nil, nil, err
 	}
 	return tracer, closer, err
 }

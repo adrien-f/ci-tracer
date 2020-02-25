@@ -113,8 +113,9 @@ type runner struct {
 	IsShared    bool   `json:"is_shared"`
 }
 
-const GitlabTimeFormat = "2006-01-02 15:04:05 MST"
+const gitlabTimeFormat = "2006-01-02 15:04:05 MST"
 
+// NewGitlabAPI will configure a Gitlab ingester
 func NewGitlabAPI(logger *log.Logger, tracer opentracing.Tracer) *GitlabAPI {
 	return &GitlabAPI{
 		&API{
@@ -125,12 +126,13 @@ func NewGitlabAPI(logger *log.Logger, tracer opentracing.Tracer) *GitlabAPI {
 	}
 }
 
+// Register the GitlabAPI to a router
 func (g *GitlabAPI) Register(r *mux.Router) {
 	s := r.PathPrefix("/gitlab").Subrouter()
-	s.HandleFunc("/{instance}", g.Ingest)
+	s.HandleFunc("/{instance}", g.ingest)
 }
 
-func (g *GitlabAPI) Ingest(w http.ResponseWriter, r *http.Request) {
+func (g *GitlabAPI) ingest(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	logger := g.logger.WithField("instance", vars["instance"])
 	if _, ok := g.instances[vars["instance"]]; !ok {
@@ -141,7 +143,14 @@ func (g *GitlabAPI) Ingest(w http.ResponseWriter, r *http.Request) {
 	var err error
 	switch eventType {
 	case "Pipeline Hook":
-		err = g.IngestPipelineHook(r, g.instances[vars["instance"]], logger)
+		var hook pipelineHook
+		err := json.NewDecoder(r.Body).Decode(&hook)
+		if err != nil {
+			log.WithError(err).Error("could not decode pipeline hook")
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		err = g.ingestPipelineHook(&hook, g.instances[vars["instance"]], logger)
 		break
 	default:
 		w.WriteHeader(http.StatusBadRequest)
@@ -155,18 +164,12 @@ func (g *GitlabAPI) Ingest(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 }
 
-func (g *GitlabAPI) IngestPipelineHook(r *http.Request, instance *GitlabInstance, logger *log.Entry) error {
-	var hook pipelineHook
-	err := json.NewDecoder(r.Body).Decode(&hook)
-	if err != nil {
-		return fmt.Errorf("could not decode pipeline hook: %w", err)
-	}
-
-	pipelineStart, err := time.Parse(GitlabTimeFormat, hook.ObjectAttributes.CreatedAt)
+func (g *GitlabAPI) ingestPipelineHook(hook *pipelineHook, instance *GitlabInstance, logger *log.Entry) error {
+	pipelineStart, err := time.Parse(gitlabTimeFormat, hook.ObjectAttributes.CreatedAt)
 	if err != nil {
 		return fmt.Errorf("could not parse pipeline start time: %w", err)
 	}
-	pipelineEnd, err := time.Parse(GitlabTimeFormat, hook.ObjectAttributes.FinishedAt)
+	pipelineEnd, err := time.Parse(gitlabTimeFormat, hook.ObjectAttributes.FinishedAt)
 	if err != nil {
 		return fmt.Errorf("could not parse pipeline start time: %w", err)
 	}
@@ -180,35 +183,43 @@ func (g *GitlabAPI) IngestPipelineHook(r *http.Request, instance *GitlabInstance
 		},
 		hook,
 	)
+	spanCtx := pipelineSpan.Context()
 
 	for _, build := range hook.Builds {
-		if build.FinishedAt == nil || build.StartedAt == nil {
-			continue
+		if err := g.processBuild(&build, spanCtx, instance); err != nil {
+			logger.WithError(err).Errorf("failed to process build %d", build.ID)
 		}
-
-		buildStart, err := time.Parse(GitlabTimeFormat, build.StartedAt.(string))
-		if err != nil {
-			return fmt.Errorf("could not parse build start time: %w", err)
-		}
-		buildEnd, err := time.Parse(GitlabTimeFormat, build.FinishedAt.(string))
-		if err != nil {
-			return fmt.Errorf("could not parse build end time: %w", err)
-		}
-
-		g.tracer.StartSpan("gitlab-job",
-			opentracing.StartTime(buildStart),
-			opentracing.ChildOf(pipelineSpan.Context()),
-			opentracing.Tag{
-				Key:   "instance",
-				Value: instance.name,
-			},
-			build,
-		).FinishWithOptions(opentracing.FinishOptions{FinishTime: buildEnd})
 	}
 
 	pipelineSpan.FinishWithOptions(opentracing.FinishOptions{FinishTime: pipelineEnd})
 
-	logger.Info("ingested pipeline %d", hook.ObjectAttributes.ID)
+	logger.Infof("ingested pipeline %d", hook.ObjectAttributes.ID)
+	return nil
+}
+
+func (g *GitlabAPI) processBuild(build *pipelineBuild, spanCtx opentracing.SpanContext, instance *GitlabInstance) error {
+	if build.FinishedAt == nil || build.StartedAt == nil {
+		return nil
+	}
+
+	buildStart, err := time.Parse(gitlabTimeFormat, build.StartedAt.(string))
+	if err != nil {
+		return fmt.Errorf("could not parse build start time: %w", err)
+	}
+	buildEnd, err := time.Parse(gitlabTimeFormat, build.FinishedAt.(string))
+	if err != nil {
+		return fmt.Errorf("could not parse build end time: %w", err)
+	}
+
+	g.tracer.StartSpan("gitlab-job",
+		opentracing.StartTime(buildStart),
+		opentracing.ChildOf(spanCtx),
+		opentracing.Tag{
+			Key:   "instance",
+			Value: instance.name,
+		},
+		build,
+	).FinishWithOptions(opentracing.FinishOptions{FinishTime: buildEnd})
 	return nil
 }
 

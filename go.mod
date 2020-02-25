@@ -12,6 +12,7 @@ require (
 	github.com/philhofer/fwd v1.0.0 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
 	github.com/sirupsen/logrus v1.4.2
+	github.com/stretchr/testify v1.4.0
 	github.com/tinylib/msgp v1.1.1 // indirect
 	github.com/uber/jaeger-client-go v2.22.1+incompatible
 	github.com/uber/jaeger-lib v2.2.0+incompatible // indirect
